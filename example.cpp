@@ -1,4 +1,4 @@
-#include "flag2.hpp"
+#include "flag.hpp"
 #include <cstdio>
 #include <format>
 #include <iostream>
