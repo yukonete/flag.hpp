@@ -37,11 +37,11 @@ int main(int argc, char **argv) {
     auto float_ = FlagHpp::flag_float("float", 0.0f, "A float.");
     auto double_ = FlagHpp::flag_float("double", -0.1, "A double.");
     auto str = FlagHpp::flag_string("string", "str", "A string.");
-    auto vec = FlagHpp::flag<Vec2>("vec", Vec2{1.0f, -1.0f}, "A Vector2. Format: x; y.");
+    auto vec = FlagHpp::flag<Vec2>("vec", Vec2{1.0f, -1.0f}, "A Vector2. Format: (x; y).");
     auto ints_list = FlagHpp::flag_list<int>("ints", std::vector{1, 2, 3},
                                         "List of integers. Format: i0, i1, ....");
     auto vecs_list = FlagHpp::flag_list<Vec2>("vecs", std::vector{Vec2{1.0f, 0.0f},
-                                        Vec2{0.0f, 1.0f}}, "List of Vector2");
+                                        Vec2{0.0f, 1.0f}}, "List of Vector2.");
     
     size_t size2 = {};
     FlagHpp::flag_int_var(&size2, "size2", 0, "A size.");
@@ -101,7 +101,6 @@ struct FlagHpp::FlagValueImpl<Vec2> : public FlagValue {
     }
 
     Error::Kind set_value(std::string_view flag_value) override {
-        // format: "0; 0"
         if (!(flag_value.starts_with('(') && flag_value.ends_with(')'))) {
             return Error::Kind::incorrect_format;
         }
