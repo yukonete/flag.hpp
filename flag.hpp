@@ -19,10 +19,26 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <cassert>
 
 namespace FlagHpp {
 
-struct Error;
+struct Error {
+    enum class Kind {
+        none,
+
+        flag_provided_not_defined,
+        no_argument_for_flag,
+        incorrect_syntax,
+
+        incorrect_format,
+        out_of_range,
+    };
+
+    Kind kind = Kind::none;
+    std::string_view flag_name;
+};
+
 struct Flag;
 
 // API that uses global flag context
@@ -91,22 +107,22 @@ inline void flag_string_var(std::string_view *out, std::string_view flag_name,
                        std::string_view default_value, std::string_view help);
 
 
-template <typename T, typename V>
+template <typename T, typename V = std::vector<T>>
     requires std::same_as<std::vector<T>, std::remove_cvref_t<V>>
 std::vector<T> *flag_list(std::string_view flag_name, V &&default_value,
                           std::string_view help);
 
-template <typename T, typename V>
+template <typename T, typename V = std::vector<T>>
     requires std::same_as<std::vector<T>, std::remove_cvref_t<V>>
 void flag_list_var(std::vector<T> *out, std::string_view flag_name,
                    V &&default_value, std::string_view help);
 
 
-template <typename T, typename V>
+template <typename T, typename V = T>
     requires std::same_as<T, std::remove_cvref_t<V>>
 T *flag(std::string_view flag_name, V &&default_value, std::string_view help);
    
-template <typename T, typename V>
+template <typename T, typename V = T>
     requires std::same_as<T, std::remove_cvref_t<V>>
 void flag_var(T *out, std::string_view flag_name, V &&default_value,
               std::string_view help);
@@ -141,24 +157,8 @@ constexpr inline std::string_view flag_disable_prefix = "/";
 constexpr inline std::string_view flag_arg_separator = "=";
 constexpr inline std::string_view flag_stop = "--";
 
-struct Error {
-    enum class Kind {
-        none,
-
-        flag_provided_not_defined,
-        no_argument_for_flag,
-        incorrect_syntax,
-
-        incorrect_format,
-        out_of_range,
-    };
-
-    Kind kind = Kind::none;
-    std::string_view flag_name;
-};
-
 struct FlagValue {
-    virtual Error::Kind set_value(std::string_view flag_value) = 0;
+    virtual Error::Kind set_value(std::string_view &flag_value) = 0;
 
     virtual std::ostreambuf_iterator<char>
     output_type_name(std::ostreambuf_iterator<char> out) const = 0;
@@ -201,13 +201,7 @@ public:
         bool encountered_flag_stop = false;
     };
 
-    ErrorHandlerFunc *error_handler = nullptr;
-
-    FlagParser(int initial_flag_capacity = 16,
-               ErrorHandlerFunc *error_handler = default_error_handler)
-        : error_handler{error_handler} {
-        flags.reserve(initial_flag_capacity);
-    }
+    ErrorHandlerFunc *error_handler = default_error_handler;
 
     void print_defaults(std::ostreambuf_iterator<char> out, int flag_ident = 2,
                         int usage_indent = 6,
@@ -231,7 +225,8 @@ public:
     }
 
     const Flag &get_flag(int i) const {
-        return flags.at(i);
+        assert(i > 0);
+        return flags[static_cast<std::size_t>(i)];
     }
 
     const Flag *get_flag(std::string_view flag_name) const {
@@ -292,7 +287,7 @@ public:
         flag_var(out, flag_name, default_value, help);
     }
 
-    template <typename T, typename V>
+    template <typename T, typename V = std::vector<T>>
         requires std::same_as<std::vector<T>, std::remove_cvref_t<V>>
     void flag_list_var(std::vector<T> *out, std::string_view flag_name,
                        V &&default_value, std::string_view help) {
@@ -322,7 +317,7 @@ public:
         return flag<std::string_view>(flag_name, default_value, help);
     }
 
-    template <typename T, typename V>
+    template <typename T, typename V = std::vector<T>>
         requires std::same_as<std::vector<T>, std::remove_cvref_t<V>>
     std::vector<T> *flag_list(std::string_view flag_name, V &&default_value,
                               std::string_view help) {
@@ -330,14 +325,14 @@ public:
                                     help);
     }
 
-    template <typename T, typename V>
+    template <typename T, typename V = T>
         requires std::same_as<T, std::remove_cvref_t<V>>
     T *flag(std::string_view flag_name, V &&default_value,
             std::string_view help) {
         return store_flag<T>(flag_name, std::forward<V>(default_value), help);
     }
 
-    template <typename T, typename V>
+    template <typename T, typename V = T>
         requires std::same_as<T, std::remove_cvref_t<V>>
     void flag_var(T *out, std::string_view flag_name, V &&default_value,
                   std::string_view help) {
@@ -451,9 +446,14 @@ public:
             }
 
             if (!disable) {
-                auto err = flag->value->set_value(flag_arg);
-                if (err != Error::Kind::none) {
-                    error = Error{.kind = err, .flag_name = flag_name};
+                auto error_kind = flag->value->set_value(flag_arg);
+                if (error_kind != Error::Kind::none) {
+                    error = Error{.kind = error_kind, .flag_name = flag_name};
+                    break;
+                }
+                if (!flag_arg.empty()) {
+                    error = Error{.kind = Error::Kind::incorrect_format,
+                                  .flag_name = flag_name};
                     break;
                 }
             }
@@ -531,7 +531,7 @@ private:
 
         if constexpr (std::is_default_constructible_v<T> &&
                       std::equality_comparable<T>) {
-            flag.is_default_value_zero = default_value == T();
+            flag.is_default_value_zero = (default_value == T{});
         }
 
         if (user_provided_storage != nullptr) {
@@ -835,40 +835,35 @@ inline void print_error(const Error &error,
 }
 
 template <typename T>
-    requires std::is_arithmetic_v<T>
-Error::Kind parse_number(std::string_view value, T *out) {
-    T flag_value_int = 0;
-    auto first = value.data();
-    auto last = first + value.size();
-    auto [ptr, ec] = std::from_chars(first, last, flag_value_int);
-    // if all characters matched then ptr is going to be equal to last
-    if (ptr == last && ec == std::errc()) {
-        *out = flag_value_int;
-        return Error::Kind::none;
-    }
+concept IntegerOrFloatingPoint = std::integral<T> || std::floating_point<T>;
 
-    // if ptr is not equal to first and last and no error, that means there was a match,
-    // but not all characters matched
-    if ((ec == std::errc() && ptr != first) ||
-        ec == std::errc::invalid_argument) {
-        return Error::Kind::incorrect_format;
+template <IntegerOrFloatingPoint T>
+Error::Kind parse_number(std::string_view &value, T &out) {
+    auto [ptr, ec] = std::from_chars(value.begin(), value.end(), out);
+    value = std::string_view{ptr, value.end()};
+    
+    auto error = Error::Kind::none;
+    if (ec == std::errc::invalid_argument) {
+        error = Error::Kind::incorrect_format;
     } else if (ec == std::errc::result_out_of_range) {
-        return Error::Kind::out_of_range;
+        error = Error::Kind::out_of_range;
     }
-
-    return Error::Kind::none;
+    return error;
 }
 
-template <typename T>
-    requires std::is_arithmetic_v<T>
+template <IntegerOrFloatingPoint T>
 struct FlagValueImpl<T> : public FlagValue {
-    T *value = nullptr;
+    T *value;
 
     FlagValueImpl(T *value) : value{value} {
     }
 
-    Error::Kind set_value(std::string_view flag_value) override {
-        return parse_number(flag_value, value);
+    Error::Kind set_value(std::string_view &flag_value) override {
+        auto error = parse_number<T>(flag_value, *value);
+        if (error != Error::Kind::none) {
+            return error;
+        }
+        return Error::Kind::none;
     }
 
     std::ostreambuf_iterator<char>
@@ -887,29 +882,45 @@ struct FlagValueImpl<T> : public FlagValue {
 
 template <>
 struct FlagValueImpl<bool> : public FlagValue {
-    bool *value = nullptr;
+    bool *value;
 
     FlagValueImpl(bool *value) : value{value} {
     }
 
-    Error::Kind set_value(std::string_view flag_value) override {
+    Error::Kind set_value(std::string_view &flag_value) override {
         using namespace std::literals;
 
-        constexpr std::array true_values{
+        if (flag_value == "0"sv || flag_value == "1"sv) {
+            *value = (flag_value == "1"sv);
+            flag_value.remove_prefix(1);
+            return Error::Kind::none;
+        }
+
+        auto take_word_or_number = [](std::string_view &str) -> std::string_view {
+            std::size_t i = 0;
+            while (i < str.size() && std::isalnum(str[i])) {
+                i += 1;
+            }
+            auto result = str.substr(0, i);
+            str = str.substr(i);
+            return result;
+        };
+
+        auto word = take_word_or_number(flag_value);
+
+        static constexpr std::array true_values{
             "true"sv, "True"sv, "TRUE"sv, "t"sv, "T"sv, "1"sv,
         };
-
-        constexpr std::array false_values{
-            "false"sv, "False"sv, "FALSE"sv, "f"sv, "F"sv, "0"sv,
-        };
-
-        auto search_true = std::ranges::find(true_values, flag_value);
+        auto search_true = std::ranges::find(true_values, word);
         if (search_true != true_values.end()) {
             *value = true;
             return Error::Kind::none;
         }
 
-        auto search_false = std::ranges::find(false_values, flag_value);
+        static constexpr std::array false_values{
+            "false"sv, "False"sv, "FALSE"sv, "f"sv, "F"sv, "0"sv,
+        };
+        auto search_false = std::ranges::find(false_values, word);
         if (search_false != false_values.end()) {
             *value = false;
             return Error::Kind::none;
@@ -934,13 +945,14 @@ struct FlagValueImpl<bool> : public FlagValue {
 
 template <>
 struct FlagValueImpl<std::string_view> : public FlagValue {
-    std::string_view *value = nullptr;
+    std::string_view *value;
 
     FlagValueImpl(std::string_view *value) : value{value} {
     }
 
-    Error::Kind set_value(std::string_view flag_value) override {
+    Error::Kind set_value(std::string_view &flag_value) override {
         *value = flag_value;
+        flag_value = {};
         return Error::Kind::none;
     }
 
@@ -950,35 +962,11 @@ struct FlagValueImpl<std::string_view> : public FlagValue {
     }
 };
 
-inline std::string_view trim(std::string_view str) {
-    if (str.empty()) {
-        return str;
-    }
-
-    {
-        auto last_left_space_index = 0;
-        for (last_left_space_index = 0; last_left_space_index < std::ssize(str);
-             ++last_left_space_index) {
-            if (str.at(last_left_space_index) != ' ') {
-                break;
-            }
-        }
-        str = str.substr(last_left_space_index);
-    }
-
-    {
-        auto last_right_space_index = 0;
-        for (last_right_space_index = static_cast<int>(str.size()) - 1;
-             last_right_space_index >= 0; --last_right_space_index) {
-            if (str.at(last_right_space_index) != ' ') {
-                break;
-            }
-        }
-        str = str.substr(0, last_right_space_index + 1);
-    }
-
-    return str;
-}
+void skip_whitespaces(std::string_view &str) {
+    while(!str.empty() && str[0] == ' ') {
+        str.remove_prefix(1);
+    }  
+};
 
 template <typename T>
 struct FlagValueImpl<std::vector<T>> : public FlagValue {
@@ -988,10 +976,11 @@ struct FlagValueImpl<std::vector<T>> : public FlagValue {
     FlagValueImpl(std::vector<T> *value) : value{value} {
     }
 
-    Error::Kind set_value(std::string_view flag_value) override {
+    Error::Kind set_value(std::string_view &flag_value) override {
         using std::operator""sv;
 
-        auto parse_and_add_value = [this](std::string_view value_string) -> Error::Kind {
+        auto parse_and_add_value =
+            [this](std::string_view &value_string) -> Error::Kind {
             auto elem = T{};
             auto elem_flag_value = FlagValueImpl<T>{&elem};
             auto err = elem_flag_value.set_value(value_string);
@@ -1007,19 +996,59 @@ struct FlagValueImpl<std::vector<T>> : public FlagValue {
             return Error::Kind::none;
         };
 
-        auto to_trimmed_string_view = [](auto &&range) {
-            return trim(std::string_view(&(*std::ranges::begin(range)),
-                                         std::ranges::distance(range)));
+        auto parse_string_untill_comma_or_close_bracket =
+            [parse_and_add_value](
+                std::string_view &quoted_string) -> Error::Kind {
+            std::size_t i = 0;
+            while (i < quoted_string.size() && quoted_string[i] != ',' &&
+                   quoted_string[i] != ']') {
+                i += 1;
+            }
+
+            auto str = quoted_string.substr(0, i);
+            quoted_string = quoted_string.substr(i);
+            return parse_and_add_value(str);
         };
 
-        for (const auto &element :
-             std::views::split(flag_value, ","sv) |
-                 std::views::transform(to_trimmed_string_view)) {
-            auto err = parse_and_add_value(element);
-            if (err != Error::Kind::none) {
-                return err;
+        if (!flag_value.starts_with('[')) {
+            if constexpr(std::convertible_to<T, std::string_view>) {
+                return parse_string_untill_comma_or_close_bracket(flag_value);
             }
+            return parse_and_add_value(flag_value);
         }
+        flag_value.remove_prefix(1);
+        skip_whitespaces(flag_value);
+
+        bool first = true;
+        while (!(flag_value.starts_with(']') || flag_value.empty())) {
+            if (!first) {
+                if (!flag_value.starts_with(',')) {
+                    return Error::Kind::incorrect_format;
+                }
+                flag_value.remove_prefix(1);
+                skip_whitespaces(flag_value);
+            } else {
+                first = false;
+            }
+            
+            if constexpr (std::convertible_to<T, std::string_view>) {
+                auto error = parse_string_untill_comma_or_close_bracket(flag_value);
+                if (error != Error::Kind::none) {
+                    return error;
+                }
+            } else {
+                auto error = parse_and_add_value(flag_value);
+                if (error != Error::Kind::none) {
+                    return error;
+                }
+            }
+            skip_whitespaces(flag_value);
+        }
+
+        if (!flag_value.starts_with(']')) {
+            return Error::Kind::incorrect_format;
+        }
+        flag_value.remove_prefix(1);
 
         return Error::Kind::none;
     }

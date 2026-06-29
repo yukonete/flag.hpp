@@ -1,4 +1,4 @@
-CXXFLAGS=-std=c++20 -Wall -Wextra -pedantic -g
+CXXFLAGS=-std=c++20 -Wall -Wextra -pedantic -g -Wconversion -Wsign-conversion
 
 .PHONY: all
 all:

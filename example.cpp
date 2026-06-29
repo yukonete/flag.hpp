@@ -1,4 +1,3 @@
-#include "flag.hpp"
 #include <cstdio>
 #include <format>
 #include <iostream>
@@ -6,14 +5,40 @@
 #include <string_view>
 #include <vector>
 
+#include "flag.hpp"
+
+#if !(defined(__cpp_lib_format_ranges) && (__cpp_lib_format_ranges == 202207L))
+template <typename T>
+struct std::formatter<std::vector<T>> {
+    template <class ParseContext>
+    constexpr ParseContext::iterator parse(ParseContext &ctx) {
+        return ctx.begin();
+    }
+
+    template <class FmtContext>
+    FmtContext::iterator format(const std::vector<T> &vec, FmtContext &ctx) const {
+        auto out = ctx.out();
+        out = std::format_to(out, "["); 
+        for (std::size_t i = 0; i < vec.size(); ++i) {
+            if (i != 0) {
+                out = std::format_to(out, ", "); 
+            }
+            out = std::format_to(out, "{}", vec[i]); 
+        }
+        out = std::format_to(out, "]"); 
+        return out;
+    }
+};
+#endif
+
 struct Vec2 {
     float x = 0.0f;
     float y = 0.0f;
-};
 
-static bool operator==(const Vec2 &left, const Vec2 &right) {
-    return left.x == right.x && left.y == right.y;
-}
+    friend bool operator==(const Vec2 &left, const Vec2 &right) {
+        return left.x == right.x && left.y == right.y;
+    }
+};
 
 template <>
 struct std::formatter<Vec2> {
@@ -24,9 +49,19 @@ struct std::formatter<Vec2> {
 
     template <class FmtContext>
     FmtContext::iterator format(const Vec2 &vec, FmtContext &ctx) const {
-        return std::format_to(ctx.out(), "({}; {})", vec.x, vec.y);
+        return std::format_to(ctx.out(), "({}, {})", vec.x, vec.y);
     }
 };
+
+template <typename... Args>
+void print(std::ostream &out, std::format_string<Args...> fmt, Args &&...args) {
+    std::format_to(std::ostreambuf_iterator(out), fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void print(std::format_string<Args...> fmt, Args &&...args) {
+    print(std::cout, fmt, std::forward<Args>(args)...);
+}
 
 int main(int argc, char **argv) {
     auto &help = *FlagHpp::flag_bool("help", false, "Show this help message.");
@@ -37,12 +72,17 @@ int main(int argc, char **argv) {
     auto float_ = FlagHpp::flag_float("float", 0.0f, "A float.");
     auto double_ = FlagHpp::flag_float("double", -0.1, "A double.");
     auto str = FlagHpp::flag_string("string", "str", "A string.");
-    auto vec = FlagHpp::flag<Vec2>("vec", Vec2{1.0f, -1.0f}, "A Vector2. Format: (x; y).");
-    auto ints_list = FlagHpp::flag_list<int>("ints", std::vector{1, 2, 3},
-                                        "List of integers. Format: i0, i1, ....");
-    auto vecs_list = FlagHpp::flag_list<Vec2>("vecs", std::vector{Vec2{1.0f, 0.0f},
-                                        Vec2{0.0f, 1.0f}}, "List of Vector2.");
-    
+    auto vec = FlagHpp::flag<Vec2>("vec", Vec2{1.0f, -1.0f},
+                                   "A Vector2. Format: (x, y).");
+    auto vecs_list = FlagHpp::flag_list<Vec2>(
+        "vecs", std::vector{Vec2{1.0f, 0.0f}, Vec2{0.0f, 1.0f}},
+        "List of Vector2. Format: [v0, v1, ...]");
+    auto strings_list =
+        FlagHpp::flag_list<std::string_view>("strings", {}, "List of strings.");
+    auto lists_list = FlagHpp::flag_list<std::vector<int>>(
+        "lists", {},
+        "List of lists of ints. Format: [[i0, i1, ...], [i0, i1, ...], ...]");
+
     size_t size2 = {};
     FlagHpp::flag_int_var(&size2, "size2", 0, "A size.");
 
@@ -51,42 +91,29 @@ int main(int argc, char **argv) {
         return ok ? 0 : 1;
     }
 
-    auto longest_flag_name = 0;
+    std::size_t longest_flag_name = 0;
     for (const auto &flag : FlagHpp::get_flags()) {
-        if (std::ssize(flag.name) > longest_flag_name) {
-            longest_flag_name = static_cast<int>(std::ssize(flag.name));
+        if (flag.name.size() > longest_flag_name) {
+            longest_flag_name = flag.name.size();
         }
     }
 
-    auto out = std::ostreambuf_iterator(std::cout);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(integer)->name, longest_flag_name, *integer);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(boolean)->name, longest_flag_name, *boolean);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(size)->name, longest_flag_name, *size);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(&size2)->name, longest_flag_name, size2);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(float_)->name, longest_flag_name, *float_);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(double_)->name, longest_flag_name, *double_);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(str)->name, longest_flag_name, *str);
-    out = std::format_to(out, "{:{}} = {}\n", FlagHpp::get_flag(vec)->name, longest_flag_name, *vec);
-    out = std::format_to(out, "{:{}} = ", FlagHpp::get_flag(ints_list)->name, longest_flag_name);
-    for (auto i = 0; i < std::ssize(*ints_list); ++i) {
-        out = std::format_to(out, "{}", (*ints_list)[i]);
-        if (i != std::ssize(*ints_list) - 1) {
-            out = std::format_to(out, ", ");
-        }
-    }
-    out = std::format_to(out, "\n{:{}} = ", FlagHpp::get_flag(vecs_list)->name, longest_flag_name);
-    for (auto i = 0; i < std::ssize(*vecs_list); ++i) {
-        out = std::format_to(out, "{}", (*vecs_list)[i]);
-        if (i != std::ssize(*vecs_list) - 1) {
-            out = std::format_to(out, ", ");
-        }
-    }
-    *out = '\n';
+    print("{:{}} = {}\n", FlagHpp::get_flag(integer)->name, longest_flag_name, *integer);
+    print("{:{}} = {}\n", FlagHpp::get_flag(boolean)->name, longest_flag_name, *boolean);
+    print("{:{}} = {}\n", FlagHpp::get_flag(size)->name, longest_flag_name, *size);
+    print("{:{}} = {}\n", FlagHpp::get_flag(&size2)->name, longest_flag_name, size2);
+    print("{:{}} = {}\n", FlagHpp::get_flag(float_)->name, longest_flag_name, *float_);
+    print("{:{}} = {}\n", FlagHpp::get_flag(double_)->name, longest_flag_name, *double_);
+    print("{:{}} = {}\n", FlagHpp::get_flag(str)->name, longest_flag_name, *str);
+    print("{:{}} = {}\n", FlagHpp::get_flag(vec)->name, longest_flag_name, *vec);
+    print("{:{}} = {}\n", FlagHpp::get_flag(vecs_list)->name, longest_flag_name, *vecs_list);
+    print("{:{}} = {}\n", FlagHpp::get_flag(strings_list)->name, longest_flag_name, *strings_list);
+    print("{:{}} = {}\n", FlagHpp::get_flag(lists_list)->name, longest_flag_name, *lists_list);
 
     if (FlagHpp::args_left() > 0) {
         std::cout << "Rest of the arguments:\n";
         for (int i = FlagHpp::args_parsed(); i < argc; ++i) {
-            std::cout << argv[i];
+            print("{}\n", argv[i]);
         }
     }
 
@@ -100,34 +127,38 @@ struct FlagHpp::FlagValueImpl<Vec2> : public FlagValue {
     FlagValueImpl(Vec2 *value) : value{value} {
     }
 
-    Error::Kind set_value(std::string_view flag_value) override {
-        if (!(flag_value.starts_with('(') && flag_value.ends_with(')'))) {
+    Error::Kind set_value(std::string_view &flag_value) override {
+        if (!flag_value.starts_with('(')) {
             return Error::Kind::incorrect_format;
         }
-
         flag_value.remove_prefix(1);
-        flag_value.remove_suffix(1);
+        skip_whitespaces(flag_value);
 
-        auto comma_index = flag_value.find(';');
-        if (comma_index == std::string_view::npos) {
+        auto vec = Vec2{};
+        auto error_x = FlagHpp::parse_number<float>(flag_value, vec.x);
+        if (error_x != Error::Kind::none) {
+            return error_x;
+        }
+        skip_whitespaces(flag_value);
+
+        if (!flag_value.starts_with(',')) {
             return Error::Kind::incorrect_format;
         }
+        flag_value.remove_prefix(1);
+        skip_whitespaces(flag_value);
 
-        auto x_string = trim(flag_value.substr(0, comma_index));
-        auto y_string = trim(flag_value.substr(comma_index + 1));
-
-        auto result = Vec2{};
-        auto error = FlagHpp::parse_number(x_string, &result.x);
-        if (error != Error::Kind::none) {
-            return error;
+        auto error_y = FlagHpp::parse_number<float>(flag_value, vec.y);
+        if (error_y != Error::Kind::none) {
+            return error_y;
         }
+        skip_whitespaces(flag_value);
 
-        error = FlagHpp::parse_number(y_string, &result.y);
-        if (error != Error::Kind::none) {
-            return error;
+        if (!flag_value.starts_with(')')) {
+            return Error::Kind::incorrect_format;
         }
+        flag_value.remove_prefix(1);
 
-        *value = result;
+        *value = vec;
         return Error::Kind::none;
     }
 
