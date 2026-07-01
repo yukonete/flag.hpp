@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 #include <cassert>
+#include <memory_resource>
 
 namespace FlagHpp {
 
@@ -177,8 +178,7 @@ struct FlagValue {
 struct Flag {
     std::string_view name;
     std::string_view help;
-    std::string default_value;
-    std::unique_ptr<FlagValue> value;
+    std::pmr::string default_value;
 };
 
 inline void default_error_handler(std::string_view error) {
@@ -194,6 +194,11 @@ concept Formattable = std::is_default_constructible_v<std::formatter<T>>;
 
 class FlagParser {
 public:
+    FlagParser(const std::pmr::polymorphic_allocator<> &allocator =
+                   std::pmr::get_default_resource())
+        : allocator{allocator}, flags{allocator} {
+    }
+
     struct ParseResult {
         Error error;
         int args_parsed = 0;
@@ -247,7 +252,7 @@ public:
                 }
                 if (auto storage = std::get_if<UniquePtrAny>(&flag.storage);
                     storage != nullptr) {
-                    result = storage->pointer.get();
+                    result = storage->get();
                 }
                 return result;
             });
@@ -344,17 +349,17 @@ public:
     ParseResult parse(It first, Se last) {
         // Determine whether flag_name is a flag. If it is, strip flag prefix
         // and return true. Otherwise return false.
-        auto strip_flag_prefix = [](std::string_view *flag_name) -> bool {
+        auto strip_flag_prefix = [](std::string_view &flag_name) -> bool {
             for (const auto &flag_prefix : flag_prefixes) {
-                if (flag_name->starts_with(flag_prefix)) {
-                    if (flag_name->size() == flag_prefix.size()) {
+                if (flag_name.starts_with(flag_prefix)) {
+                    if (flag_name.size() == flag_prefix.size()) {
                         // flag_name starts with flag_prefix and has the same
                         // size => flag_name == flag_prefix => flag_name is not
                         // a flag
                         return false;
                     }
 
-                    *flag_name = flag_name->substr(flag_prefix.size());
+                    flag_name.remove_prefix(flag_prefix.size());
                     return true;
                 }
             }
@@ -362,25 +367,25 @@ public:
         };
 
         auto strip_flag_disable_prefix =
-            [](std::string_view *flag_name) -> bool {
-            if (flag_name->starts_with(flag_disable_prefix)) {
-                *flag_name = flag_name->substr(flag_disable_prefix.size());
+            [](std::string_view &flag_name) -> bool {
+            if (flag_name.starts_with(flag_disable_prefix)) {
+                flag_name.remove_prefix(flag_disable_prefix.size());
                 return true;
             }
             return false;
         };
 
         auto argument_split = [](std::string_view arg,
-                                 std::string_view *flag_name,
-                                 std::string_view *flag_value) -> bool {
+                                 std::string_view &flag_name,
+                                 std::string_view &flag_value) -> bool {
             auto equals_index = arg.find('=');
             if (equals_index == std::string_view::npos) {
-                *flag_name = arg;
+                flag_name = arg;
                 return true;
             }
 
-            *flag_name = arg.substr(0, equals_index);
-            *flag_value = arg.substr(equals_index + 1);
+            flag_name = arg.substr(0, equals_index);
+            flag_value = arg.substr(equals_index + 1);
             return false;
         };
 
@@ -397,7 +402,7 @@ public:
                 break;
             }
 
-            bool is_flag = strip_flag_prefix(&arg);
+            bool is_flag = strip_flag_prefix(arg);
             if (!is_flag) {
                 break;
             }
@@ -405,11 +410,11 @@ public:
             args_parsed += 1;
             flags_parsed += 1;
 
-            bool disable = strip_flag_disable_prefix(&arg);
+            bool disable = strip_flag_disable_prefix(arg);
 
             std::string_view flag_name;
             std::string_view flag_arg;
-            bool look_for_next_arg = argument_split(arg, &flag_name, &flag_arg);
+            bool look_for_next_arg = argument_split(arg, flag_name, flag_arg);
 
             if (flag_name.empty()) {
                 error = Error{
@@ -473,20 +478,72 @@ public:
     }
 
 private:
-    struct UniquePtrAny {
-        std::unique_ptr<void, void (*)(void *)> pointer = {nullptr, nullptr};
+    struct UnqiuePtrAnyDeleter {
+        using DeleterFunc = void(*)(std::pmr::polymorphic_allocator<> &allocator, void *pointer);
 
-        UniquePtrAny() {
+        std::pmr::polymorphic_allocator<> *allocator;
+        DeleterFunc delete_func;
+
+        constexpr UnqiuePtrAnyDeleter(std::pmr::polymorphic_allocator<> *allocator,
+                          DeleterFunc func)
+            : allocator{allocator}, delete_func{func} {
         }
 
         template <typename T>
-        UniquePtrAny(T *pointer_to_store)
-            : pointer{pointer_to_store,
-                      [](void *pointer) { delete static_cast<T *>(pointer); }} {
+        static UnqiuePtrAnyDeleter
+        create(std::pmr::polymorphic_allocator<> &allocator) noexcept {
+            auto func = [](std::pmr::polymorphic_allocator<> &a,
+                           void *pointer) {
+                auto object = static_cast<T *>(pointer);
+                a.delete_object(object);
+            };
+
+            return UnqiuePtrAnyDeleter{&allocator, func};
+        }
+
+        void operator()(void *pointer) {
+            delete_func(*allocator, pointer);
         }
     };
 
+    struct FlagValueDeleter {
+        std::pmr::polymorphic_allocator<> *allocator = nullptr;
+        std::size_t size = 0;
+        std::size_t alignment = 0;
+
+        void operator()(FlagValue *pointer) {
+            pointer->~FlagValue();
+            allocator->deallocate_bytes(pointer, size, alignment);
+        }
+    };
+
+    template <typename T, typename... Args>
+    std::unique_ptr<FlagValue, FlagValueDeleter>
+    make_unique_flag_value(std::pmr::polymorphic_allocator<> &allocator, Args &&...args) {
+        auto pointer = static_cast<T*>(allocator.allocate_bytes(sizeof(T), alignof(T)));
+        try {
+            allocator.construct(pointer, std::forward<Args>(args)...);
+        } catch (...) {
+            allocator.deallocate_bytes(pointer, sizeof(T), alignof(T));
+            return {nullptr, {}};
+        }
+        return std::unique_ptr<FlagValue, FlagValueDeleter>{pointer, FlagValueDeleter{
+            .allocator = &allocator,
+            .size = sizeof(T),
+            .alignment = alignof(T),
+        }};
+    }
+
+    using UniquePtrAny = std::unique_ptr<void, UnqiuePtrAnyDeleter>;
+
+    template <typename T>
+    UniquePtrAny create_unique_any(std::pmr::polymorphic_allocator<> &allocator,
+                                   T *pointer) noexcept {
+        return UniquePtrAny{pointer, UnqiuePtrAnyDeleter::create<T>(allocator)};
+    }
+
     struct FlagInternal : public Flag {
+        std::unique_ptr<FlagValue, FlagValueDeleter> value = {nullptr, {}};
         std::variant<UniquePtrAny, void *> storage = nullptr;
         bool is_default_value_zero = false;
         bool has_default_value = false;
@@ -510,7 +567,8 @@ private:
             return nullptr;
         }
 
-        flags.push_back(FlagInternal{});
+        
+        flags.push_back(FlagInternal{{.default_value = std::pmr::string{allocator}}});
         auto &flag = flags.back();
 
         flag.name = flag_name;
@@ -537,13 +595,13 @@ private:
         if (user_provided_storage != nullptr) {
             *user_provided_storage = std::forward<V>(default_value);
             flag.storage = user_provided_storage;
-            flag.value =
-                std::make_unique<FlagValueImpl<T>>(user_provided_storage);
+            flag.value = make_unique_flag_value<FlagValueImpl<T>>(allocator, user_provided_storage);
             return user_provided_storage;
         } else {
-            auto flag_storage = new T{std::forward<V>(default_value)};
-            flag.storage = UniquePtrAny{flag_storage};
-            flag.value = std::make_unique<FlagValueImpl<T>>(flag_storage);
+            auto flag_storage =
+                allocator.new_object<T>(std::forward<V>(default_value));
+            flag.storage = create_unique_any(allocator, flag_storage);
+            flag.value = make_unique_flag_value<FlagValueImpl<T>>(allocator, flag_storage);
             return flag_storage;
         }
     }
@@ -595,7 +653,8 @@ private:
                                    });
     }
 
-    std::vector<FlagInternal> flags;
+    std::pmr::polymorphic_allocator<> allocator;
+    std::pmr::vector<FlagInternal> flags;
 };
 
 inline struct {
