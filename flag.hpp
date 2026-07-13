@@ -21,11 +21,14 @@
 namespace fhpp {
 
 // TODO: 
-// Consider using single buffer to store flags values and FlagValueImpl<T> objects.
+// 1) Consider using single buffer to store flags values and FlagValueImpl<T> objects.
 // That way the only 2 global configuration variables that are going to be left are
-// max_flags and storage_size, where storage_size is the size of the that buffer.
+// max_flags and storage_size, where storage_size is the size of that buffer.
 // default_value_string_storage_size won't be needed because this buffer will be used to
 // store string data as well.
+// 2) Add flag which is a list with specified max lenght, 
+// so that space for it will not have to be allocated 
+// dynamically and could be provided by user as well. 
 
 // CONFIGURATION
 // Library does no dynamic allocations to store flags.
@@ -41,6 +44,7 @@ constexpr inline size_t max_flags = 64;
 constexpr inline size_t flag_storage_size_in_ptrs = 3;
 
 // Size of the storage for FlagValueImpl<T>
+// Uses same storage as actuall value of a flag
 // Dont forget to account for pointer to vtable
 constexpr inline size_t flag_value_storage_size_in_ptrs = 3;
 
@@ -73,7 +77,8 @@ struct Error {
 
 struct FlagValue {
     // set_value should try to parse value from the beginning of flag_value string
-    // and do not report error if there are any more characters left after parsing
+    // and do not report error if there are any more characters left after parsing.
+    // After value is parsed, flag_value should containt only the rest of the string
     virtual Error::Kind set_value(std::string_view &flag_value) = 0;
 
     virtual std::ostreambuf_iterator<char> output_type_name(std::ostreambuf_iterator<char> out) const = 0;

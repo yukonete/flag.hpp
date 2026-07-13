@@ -88,7 +88,8 @@ struct fhpp::FlagValueImpl<Vec2> : public FlagValue {
     }
 
     // set_value should try to parse value from the beginning of flag_value string
-    // and do not report error if there are any more characters left after parsing
+    // and do not report error if there are any more characters left after parsing.
+    // After value is parsed, flag_value should containt only the rest of the string
     Error::Kind set_value(std::string_view &flag_value) override {
         if (!flag_value.starts_with('(')) {
             return Error::Kind::incorrect_format;
